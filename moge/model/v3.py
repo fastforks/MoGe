@@ -117,6 +117,7 @@ class MoGeModel(MoGeModelV2):
         refine_steps: int = 3,
         refiner_detach_backbone: bool = True,
         return_per_step: bool = False,
+        return_normal: bool = True,
     ) -> Dict[str, torch.Tensor]:
         if refine_steps > 0 and not hasattr(self, 'refiner'):
             raise ValueError("Refiner is not enabled but refine_steps > 0.")
@@ -149,8 +150,9 @@ class MoGeModel(MoGeModelV2):
 
         # Heads decoding
         raw_coord = self.points_head(neck_features)[-1] if hasattr(self, 'points_head') else None
+        heads = ['normal_head', 'mask_head'] if return_normal else ['mask_head']
         normal, mask = (
-            getattr(self, head)(neck_features)[-1] if hasattr(self, head) else None
+            getattr(self, head)(neck_features)[-1] if head in heads and hasattr(self, head) else None
             for head in ['normal_head', 'mask_head']
         )
         metric_scale = self.scale_head(cls_token) if hasattr(self, 'scale_head') else None
@@ -228,6 +230,7 @@ class MoGeModel(MoGeModelV2):
         refine_steps: int = 3,
         return_per_step: bool = False,
         use_fp16: bool = False,
+        return_normal: bool = True,
     ) -> Dict[str, torch.Tensor]:
         """
         User-friendly inference function
@@ -242,6 +245,7 @@ class MoGeModel(MoGeModelV2):
         - `refine_steps`: number of sparse 3D refinement updates. Default: 3.
         - `return_per_step`: if True, return predictions for the initial estimate and every refinement step. Default: False.
         - `use_fp16`: if True, use mixed precision to speed up inference. Default: False.
+        - `return_normal`: if False, the normal head is not run (it is not needed for depth, points and mask). Default: True.
 
         ### Returns
         A dictionary containing the following keys when the corresponding outputs are available:
@@ -274,7 +278,7 @@ class MoGeModel(MoGeModelV2):
 
         # Forward pass
         with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=use_fp16 and self.dtype != torch.float16):
-            output = self.forward(image, num_tokens=num_tokens, refine_steps=refine_steps, return_per_step=return_per_step)
+            output = self.forward(image, num_tokens=num_tokens, refine_steps=refine_steps, return_per_step=return_per_step, return_normal=return_normal)
         affine_points, normal, mask, metric_scale = (output.get(k, None) for k in ['points', 'normal', 'mask', 'metric_scale'])
         affine_points_per_step = output.get('points_per_step', None)
 

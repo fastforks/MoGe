@@ -172,7 +172,7 @@ class MoGeModel(nn.Module):
             raise ValueError(f"Invalid remap output type: {self.remap_output}")
         return points
     
-    def forward(self, image: torch.Tensor, num_tokens: Union[int, torch.LongTensor]) -> Dict[str, torch.Tensor]:
+    def forward(self, image: torch.Tensor, num_tokens: Union[int, torch.LongTensor], return_normal: bool = True) -> Dict[str, torch.Tensor]:
         batch_size, _, img_h, img_w = image.shape
         device, dtype = image.device, image.dtype
 
@@ -200,7 +200,8 @@ class MoGeModel(nn.Module):
         features = self.neck(features)
 
         # Heads decoding
-        points, normal, mask = (getattr(self, head)(features)[-1] if hasattr(self, head) else None for head in ['points_head', 'normal_head', 'mask_head'])
+        heads = ['points_head', 'normal_head', 'mask_head'] if return_normal else ['points_head', 'mask_head']
+        points, normal, mask = (getattr(self, head)(features)[-1] if head in heads and hasattr(self, head) else None for head in ['points_head', 'normal_head', 'mask_head'])
         metric_scale = self.scale_head(cls_token) if hasattr(self, 'scale_head') else None
         
         # Resize
@@ -238,6 +239,7 @@ class MoGeModel(nn.Module):
         apply_mask: bool = True,
         fov_x: Optional[Union[Number, torch.Tensor]] = None,
         use_fp16: bool = True,
+        return_normal: bool = True,
     ) -> Dict[str, torch.Tensor]:
         """
         User-friendly inference function
@@ -250,6 +252,7 @@ class MoGeModel(nn.Module):
         - `apply_mask`: if True, the output point map will be masked using the predicted mask. Default: True
         - `fov_x`: the horizontal camera FoV in degrees. If None, it will be inferred from the predicted point map. Default: None
         - `use_fp16`: if True, use mixed precision to speed up inference. Default: True
+        - `return_normal`: if False, the normal head is not run (it is not needed for depth, points and mask). Default: True
             
         ### Returns
 
@@ -276,7 +279,7 @@ class MoGeModel(nn.Module):
 
         # Forward pass
         with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=use_fp16 and self.dtype != torch.float16):
-            output = self.forward(image, num_tokens=num_tokens)
+            output = self.forward(image, num_tokens=num_tokens, return_normal=return_normal)
         points, normal, mask, metric_scale = (output.get(k, None) for k in ['points', 'normal', 'mask', 'metric_scale'])
 
         # Always process the output in fp32 precision
