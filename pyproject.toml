@@ -53,6 +53,8 @@ include = ["moge*"]
 
 [tool.setuptools.package-data]
 "moge.utils.gradio_3d_viewer" = ["viewer.html", "assets/*.js", "assets/LICENSE"]
+"moge.fast" = ["*.cu", "prebuilt/*"]
+"moge.fast.fastbb_vendored" = ["*.cu", "prebuilt/*"]
 
 [tool.uv]
 environments = ["sys_platform == 'linux'", "sys_platform == 'win32'"]
