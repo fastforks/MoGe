@@ -1,3 +1,32 @@
+# MoGe: faster inference fork
+
+> **You are on `portable`.** Research fork of [microsoft/MoGe](https://github.com/microsoft/MoGe) (base `74fbce0`; `main` mirrors upstream). Two branches:
+> - [`portable`](https://github.com/fastforks/MoGe/tree/portable): plain PyTorch, no build step; `forward_net` (the network on a token-grid image) exports to ONNX / TensorRT with dynamic H/W, `infer`'s geometry postprocessing stays eager.
+> - [`cuda-kernels`](https://github.com/fastforks/MoGe/tree/cuda-kernels): `portable` plus `moge.fast` (fp16 ViT with flash attention, fp16-accumulate GEMMs and cuDNN convolutions, NHWC bilinear / replicate-pad kernels; prebuilt for sm_80 to sm_120, nvcc fallback; `pip install nvidia-cudnn-frontend` for the cuDNN convs).
+> Licence, as upstream: MIT ([LICENSE](LICENSE)). Weights are on Hugging Face and not included here. Covers MoGe-2 only; MoGe-3 is not covered by the fast path.
+
+```python
+from moge.model.v2 import MoGeModel
+model = MoGeModel.from_pretrained("moge-2-vitl-normal/model.pt").cuda().eval()
+out = model.infer(image, resolution_level=9, return_normal=False)  # RGB [3, H, W], float in [0, 1], on GPU
+```
+On `cuda-kernels`, `MOGE_FAST_KERNELS=0` turns the custom kernels off (plain PyTorch fallback, still faster than `portable`). Tests: `MOGE_TEST_CKPT=/path/to/model.pt pytest tests`.
+
+RTX 5060 Ti 16 GB, torch 2.14.1+cu130, 2026-10-12; cold process, median of 15 runs after warm-up; MoGe-2 ViT-L normal, 1482x994 image at 3600 tokens (native) and at 518 long side. Memory = torch peak allocated / reserved. First call / new size = total latency of that call. Accuracy: NYU-20 AbsRel (affine-aligned depth) and relative depth difference to upstream.
+
+| version | native ms | 518 ms | speed-up native vs `infer` default | peak MB native | peak MB 518 | startup / first call / new size | NYU-20 AbsRel | rel. depth diff vs upstream |
+|---|---|---|---|---|---|---|---|---|
+| upstream, fp32 (CLI path) | 500.4 | 97.3 | 0.34x | 2642 / 3258 | 1659 / 1830 | 5.2 s / 1002 ms / 99 ms | 0.0321 | 0 |
+| upstream, `infer` default (fp16 autocast) | 169.7 | 43.2 | 1.00x | 2335 / 2618 | 1580 / 1672 | 5.2 s / 823 ms / 144 ms | 0.0321 | - |
+| **portable** (`return_normal=False`) | 153.2 | 39.7 | 1.11x | 2332 / 2632 | 1579 / 1668 | 4.6 s / 1072 ms / 139 ms | 0.0321 | fp rounding only |
+| portable + `model.half()` | 137.1 | 33.6 | 1.24x | 1363 / 1680 | 871 / 928 | 4.6 s / 1069 ms / 135 ms | 0.0321 | 3e-4 |
+| **cuda-kernels** | 85.9 | 22.0 | 1.98x | 1479 / 1786 | 931 / 1012 | 1.5 s / 854 ms / 45 ms | 0.0321 | 1e-3 |
+| cuda-kernels, kernels off | 133.5 | 30.0 | 1.27x | 1592 / 1946 | 960 / 1046 | 1.4 s / 879 ms / 35 ms | 0.0321 | 3e-4 |
+
+Speed-up is against upstream's default `infer` (fp16 autocast); against the fp32 CLI path, portable is 3.27x and cuda-kernels 5.83x. Raw numbers, commits and commands: `results/2026-10-12_moge_release/` of the publishing workspace.
+
+---
+
 # MoGe: Accurate Monocular Geometry Estimation
 
 MoGe is a powerful model for recovering 3D geometry from monocular open-domain images, including metric point maps, metric depth maps, normal maps and camera FOV. ***Check our websites ([MoGe-1](https://wangrc.site/MoGePage), [MoGe-2](https://wangrc.site/MoGe2Page), [MoGe-3](https://qft-333.github.io/moge3page/)) for videos and interactive results!***
