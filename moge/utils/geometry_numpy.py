@@ -2,9 +2,7 @@ from typing import *
 from functools import partial
 import math
 
-import cv2
 import numpy as np
-from scipy.signal import fftconvolve
 import numpy as np
 try:
     import utils3d_moge as utils3d
@@ -147,6 +145,7 @@ def norm3d(x: np.ndarray) -> np.ndarray:
     
 
 def depth_occlusion_edge_numpy(depth: np.ndarray, mask: np.ndarray, thickness: int = 1, tol: float = 0.1):
+    import cv2
     disp = np.where(mask, 1 / depth, 0)
     disp_pad = np.pad(disp, (thickness, thickness), constant_values=0)
     mask_pad = np.pad(mask, (thickness, thickness), constant_values=False)
@@ -195,6 +194,7 @@ def disk_blur(image: np.ndarray, radius: int) -> np.ndarray:
     Returns:
         np.ndarray: Blurred image.
     """
+    from scipy.signal import fftconvolve
     if radius == 0:
         return image
     kernel = disk_kernel(radius)
@@ -230,6 +230,7 @@ def depth_of_field(
     Returns:
         numpy.ndarray: (H, W, 3) output image with depth of field effect applied.
     """
+    import cv2
     # Precalculate dialated depth map for each blur radius
     max_disp = np.max(disp)
     disp = disp / max_disp
