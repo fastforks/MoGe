@@ -186,10 +186,11 @@ class MoGeModel(nn.Module):
             raise ValueError(f"Invalid remap output type: {self.remap_output}")
         return points
     
-    def forward_net(self, image_14: torch.Tensor, aspect_ratio: Optional[float] = None) -> Tuple[Optional[torch.Tensor], ...]:
+    def forward_net(self, image_14: torch.Tensor, aspect_ratio: Optional[float] = None, return_normal: bool = True) -> Tuple[Optional[torch.Tensor], ...]:
         """Network on an image already resized to the token grid (H, W multiples of 14, RGB in [0, 1]). Returns the raw head
         outputs at that resolution: points (before remap), normal, mask logit, metric scale logit (None if the head is absent).
         `aspect_ratio` (default: grid width / height) is the aspect of the UV inputs; `forward` passes the input image's.
+        With `return_normal=False` the normal head is not run (the normal output is None).
         Only shape-generic tensor math, so it exports to ONNX / TensorRT with dynamic H/W."""
         batch_size, _, h14, w14 = image_14.shape
         base_h, base_w = h14 // 14, w14 // 14
@@ -211,11 +212,12 @@ class MoGeModel(nn.Module):
         features = self.neck(features)
 
         # Heads decoding
-        points, normal, mask = (getattr(self, head)(features)[-1] if hasattr(self, head) else None for head in ['points_head', 'normal_head', 'mask_head'])
+        heads = ['points_head', 'normal_head', 'mask_head'] if return_normal else ['points_head', 'mask_head']
+        points, normal, mask = (getattr(self, head)(features)[-1] if head in heads and hasattr(self, head) else None for head in ['points_head', 'normal_head', 'mask_head'])
         metric_scale = self.scale_head(cls_token) if hasattr(self, 'scale_head') else None
         return points, normal, mask, metric_scale
 
-    def forward(self, image: torch.Tensor, num_tokens: Union[int, torch.LongTensor]) -> Dict[str, torch.Tensor]:
+    def forward(self, image: torch.Tensor, num_tokens: Union[int, torch.LongTensor], return_normal: bool = True) -> Dict[str, torch.Tensor]:
         _, _, img_h, img_w = image.shape
 
         aspect_ratio = img_w / img_h
@@ -226,7 +228,7 @@ class MoGeModel(nn.Module):
             base_h, base_w = round(base_h), round(base_w)
 
         image_14 = F.interpolate(image, (base_h * 14, base_w * 14), mode="bilinear", align_corners=False, antialias=not self.encoder.onnx_compatible_mode)
-        points, normal, mask, metric_scale = self.forward_net(image_14, aspect_ratio)
+        points, normal, mask, metric_scale = self.forward_net(image_14, aspect_ratio, return_normal)
 
         # Resize
         points, normal, mask = (F.interpolate(v, (img_h, img_w), mode='bilinear', align_corners=False, antialias=False) if v is not None else None for v in [points, normal, mask])
@@ -263,6 +265,7 @@ class MoGeModel(nn.Module):
         apply_mask: bool = True,
         fov_x: Optional[Union[Number, torch.Tensor]] = None,
         use_fp16: bool = True,
+        return_normal: bool = True,
     ) -> Dict[str, torch.Tensor]:
         """
         User-friendly inference function
@@ -275,6 +278,7 @@ class MoGeModel(nn.Module):
         - `apply_mask`: if True, the output point map will be masked using the predicted mask. Default: True
         - `fov_x`: the horizontal camera FoV in degrees. If None, it will be inferred from the predicted point map. Default: None
         - `use_fp16`: if True, use mixed precision to speed up inference. Default: True
+        - `return_normal`: if False, the normal head is not run (it is not needed for depth, points and mask). Default: True
             
         ### Returns
 
@@ -301,7 +305,7 @@ class MoGeModel(nn.Module):
 
         # Forward pass
         with torch.autocast(device_type=self.device.type, dtype=torch.float16, enabled=use_fp16 and self.dtype != torch.float16):
-            output = self.forward(image, num_tokens=num_tokens)
+            output = self.forward(image, num_tokens=num_tokens, return_normal=return_normal)
         points, normal, mask, metric_scale = (output.get(k, None) for k in ['points', 'normal', 'mask', 'metric_scale'])
 
         # Always process the output in fp32 precision
