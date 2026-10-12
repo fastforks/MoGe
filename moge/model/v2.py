@@ -24,6 +24,20 @@ from .modules.mlp import MLP
 from .modules.conv_stack import ConvStack
 
 
+def _view_plane_uv(width, height, ref: torch.Tensor, aspect_ratio=None) -> torch.Tensor:
+    """Same values as normalized_view_plane_uv(width, height, aspect_ratio, ref.dtype, ref.device) (aspect_ratio default:
+    width / height), in tensor math so that width and height may be symbolic sizes while exporting:
+    u_i = span_x * (2 i - (width - 1)) / width, likewise v."""
+    one = torch.ones((), dtype=torch.float32, device=ref.device)
+    w, h = one * width, one * height
+    aspect = w / h if aspect_ratio is None else one * aspect_ratio
+    span_x, span_y = aspect / (1 + aspect ** 2) ** 0.5, 1 / (1 + aspect ** 2) ** 0.5
+    u = span_x * (2 * torch.arange(width, device=ref.device, dtype=torch.float32) - (w - 1)) / w
+    v = span_y * (2 * torch.arange(height, device=ref.device, dtype=torch.float32) - (h - 1)) / h
+    u, v = torch.meshgrid(u, v, indexing='xy')
+    return torch.stack([u, v], dim=-1).to(ref.dtype)
+
+
 class MoGeModel(nn.Module):
     encoder: DINOv2Encoder
     neck: ConvStack
@@ -172,24 +186,21 @@ class MoGeModel(nn.Module):
             raise ValueError(f"Invalid remap output type: {self.remap_output}")
         return points
     
-    def forward(self, image: torch.Tensor, num_tokens: Union[int, torch.LongTensor]) -> Dict[str, torch.Tensor]:
-        batch_size, _, img_h, img_w = image.shape
-        device, dtype = image.device, image.dtype
-
-        aspect_ratio = img_w / img_h
-        base_h, base_w = (num_tokens / aspect_ratio) ** 0.5, (num_tokens * aspect_ratio) ** 0.5
-        if isinstance(base_h, torch.Tensor):
-            base_h, base_w = base_h.round().long(), base_w.round().long()
-        else:
-            base_h, base_w = round(base_h), round(base_w)
+    def forward_net(self, image_14: torch.Tensor, aspect_ratio: Optional[float] = None) -> Tuple[Optional[torch.Tensor], ...]:
+        """Network on an image already resized to the token grid (H, W multiples of 14, RGB in [0, 1]). Returns the raw head
+        outputs at that resolution: points (before remap), normal, mask logit, metric scale logit (None if the head is absent).
+        `aspect_ratio` (default: grid width / height) is the aspect of the UV inputs; `forward` passes the input image's.
+        Only shape-generic tensor math, so it exports to ONNX / TensorRT with dynamic H/W."""
+        batch_size, _, h14, w14 = image_14.shape
+        base_h, base_w = h14 // 14, w14 // 14
 
         # Backbones encoding
-        features, cls_token = self.encoder(image, base_h, base_w, return_class_token=True)
+        features, cls_token = self.encoder.forward_resized(image_14, return_class_token=True)
         features = [features, None, None, None, None]
 
         # Concat UVs for aspect ratio input
         for level in range(5):
-            uv = normalized_view_plane_uv(width=base_w * 2 ** level, height=base_h * 2 ** level, aspect_ratio=aspect_ratio, dtype=dtype, device=device)
+            uv = _view_plane_uv(base_w * 2 ** level, base_h * 2 ** level, image_14, aspect_ratio)
             uv = uv.permute(2, 0, 1).unsqueeze(0).expand(batch_size, -1, -1, -1)
             if features[level] is None:
                 features[level] = uv
@@ -202,7 +213,21 @@ class MoGeModel(nn.Module):
         # Heads decoding
         points, normal, mask = (getattr(self, head)(features)[-1] if hasattr(self, head) else None for head in ['points_head', 'normal_head', 'mask_head'])
         metric_scale = self.scale_head(cls_token) if hasattr(self, 'scale_head') else None
-        
+        return points, normal, mask, metric_scale
+
+    def forward(self, image: torch.Tensor, num_tokens: Union[int, torch.LongTensor]) -> Dict[str, torch.Tensor]:
+        _, _, img_h, img_w = image.shape
+
+        aspect_ratio = img_w / img_h
+        base_h, base_w = (num_tokens / aspect_ratio) ** 0.5, (num_tokens * aspect_ratio) ** 0.5
+        if isinstance(base_h, torch.Tensor):
+            base_h, base_w = base_h.round().long(), base_w.round().long()
+        else:
+            base_h, base_w = round(base_h), round(base_w)
+
+        image_14 = F.interpolate(image, (base_h * 14, base_w * 14), mode="bilinear", align_corners=False, antialias=not self.encoder.onnx_compatible_mode)
+        points, normal, mask, metric_scale = self.forward_net(image_14, aspect_ratio)
+
         # Resize
         points, normal, mask = (F.interpolate(v, (img_h, img_w), mode='bilinear', align_corners=False, antialias=False) if v is not None else None for v in [points, normal, mask])
         

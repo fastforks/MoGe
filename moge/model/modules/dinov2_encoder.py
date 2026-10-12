@@ -57,6 +57,11 @@ class DINOv2Encoder(nn.Module):
 
     def forward(self, image: torch.Tensor, token_rows: Union[int, torch.LongTensor], token_cols: Union[int, torch.LongTensor], return_class_token: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
         image_14 = F.interpolate(image, (token_rows * 14, token_cols * 14), mode="bilinear", align_corners=False, antialias=not self.onnx_compatible_mode)
+        return self.forward_resized(image_14, return_class_token)
+
+    def forward_resized(self, image_14: torch.Tensor, return_class_token: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+        "Encoder on an image already resized to the token grid (H, W multiples of 14), RGB in [0, 1]."
+        token_rows, token_cols = image_14.shape[-2] // 14, image_14.shape[-1] // 14
         image_14 = (image_14 - self.image_mean) / self.image_std
 
         # Get intermediate layers from the backbone
