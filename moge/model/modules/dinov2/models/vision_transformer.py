@@ -41,6 +41,30 @@ class BlockChunk(nn.ModuleList):
         return x
 
 
+def _bicubic_matrix(n, offset, M, device):
+    """[n, M] matrix of PyTorch's bicubic upsampling (align_corners=False, A=-0.75, border clamp) from M to n samples with
+    scale_factor (n + offset) / M, i.e. source = (i + 0.5) * M / (n + offset) - 0.5 as in upsample_bicubic2d. Built from
+    tensor ops so that n may be a symbolic size."""
+    i = torch.arange(n, device=device, dtype=torch.float32)
+    src = (i + 0.5) * (M / (i.new_ones(()) * n + offset)) - 0.5
+    x0 = torch.floor(src)
+    t = src - x0
+    A = -0.75
+
+    def near(d):  # |d| <= 1
+        return ((A + 2) * d - (A + 3)) * d * d + 1
+
+    def far(d):  # 1 < |d| < 2
+        return ((A * d - 5 * A) * d + 8 * A) * d - 4 * A
+
+    cols = torch.arange(M, device=device)
+    mat = torch.zeros((n, M), device=device, dtype=torch.float32)
+    for k, c in enumerate((far(t + 1), near(t), near(1 - t), far(2 - t))):
+        idx = (x0.long() - 1 + k).clamp(0, M - 1)
+        mat = mat + c[:, None] * (idx[:, None] == cols[None, :]).float()
+    return mat
+
+
 class DinoVisionTransformer(nn.Module):
     def __init__(
         self,
@@ -188,7 +212,7 @@ class DinoVisionTransformer(nn.Module):
         npatch = x.shape[1] - 1
         batch_size = x.shape[0]
         N = self.pos_embed.shape[1] - 1
-        if not self.onnx_compatible_mode and npatch == N and w == h:
+        if not self.onnx_compatible_mode and not torch.compiler.is_exporting() and npatch == N and w == h:
             return self.pos_embed
         pos_embed = self.pos_embed.float()
         class_pos_embed = pos_embed[:, 0, :]
@@ -197,23 +221,30 @@ class DinoVisionTransformer(nn.Module):
         h0, w0 = h // self.patch_size, w // self.patch_size
         M = int(math.sqrt(N))  # Recover the number of patches in each dimension
         assert N == M * M
-        kwargs = {}
-        if not self.onnx_compatible_mode and self.interpolate_offset > 0:
-            # Historical kludge: add a small number to avoid floating point error in the interpolation, see https://github.com/facebookresearch/dino/issues/8
-            # Note: still needed for backward-compatibility, the underlying operators are using both output size and scale factors
-            sx = float(w0 + self.interpolate_offset) / M
-            sy = float(h0 + self.interpolate_offset) / M
-            kwargs["scale_factor"] = (sy, sx)
+        offset = self.interpolate_offset
+        if torch.compiler.is_exporting() and not self.onnx_compatible_mode:
+            # Preserve the native-square identity shortcut in a dynamic graph.
+            one = pos_embed.new_ones(())
+            native = (one * npatch == N) & (one * w == one * h)
+            offset = torch.where(native, 0.0, offset)
+        grid = patch_pos_embed.reshape(1, M, M, dim).permute(0, 3, 1, 2)
+        if self.interpolate_offset > 0 and not self.interpolate_antialias:
+            # Historical kludge: scale_factor (n + offset) / M, see https://github.com/facebookresearch/dino/issues/8.
+            # Computed as two bicubic interpolation matrices from the token grid size (equal to F.interpolate with that
+            # scale_factor up to fp32 rounding): traces and exports with dynamic shapes and keeps the trained values
+            # (the size= fallback of onnx_compatible_mode samples at different positions).
+            ry = _bicubic_matrix(h0, offset, M, grid.device)
+            rx = _bicubic_matrix(w0, offset, M, grid.device)
+            patch_pos_embed = (ry @ grid @ rx.T).contiguous()
         else:
-            # Simply specify an output size instead of a scale factor
-            kwargs["size"] = (h0, w0)
-
-        patch_pos_embed = nn.functional.interpolate(
-            patch_pos_embed.reshape(1, M, M, dim).permute(0, 3, 1, 2),
-            mode="bicubic",
-            antialias=self.interpolate_antialias,
-            **kwargs,
-        )
+            kwargs = {}
+            if not self.onnx_compatible_mode and self.interpolate_offset > 0:
+                sx = float(w0 + self.interpolate_offset) / M
+                sy = float(h0 + self.interpolate_offset) / M
+                kwargs["scale_factor"] = (sy, sx)
+            else:
+                kwargs["size"] = (h0, w0)
+            patch_pos_embed = nn.functional.interpolate(grid, mode="bicubic", antialias=self.interpolate_antialias, **kwargs)
 
         assert (h0, w0) == patch_pos_embed.shape[-2:]
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).flatten(1, 2)
