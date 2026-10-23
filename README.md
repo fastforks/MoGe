@@ -15,14 +15,17 @@ On `cuda-kernels`, `MOGE_FAST_KERNELS=0` turns the custom kernels off (plain PyT
 
 RTX 5060 Ti 16 GB, torch 2.14.1+cu130, 2026-10-12; cold process, median of 15 runs after warm-up; MoGe-2 ViT-L normal, 1482x994 image at 3600 tokens (native) and at 518 long side. Memory = torch peak allocated / reserved. First call / new size = total latency of that call. Accuracy: NYU-20 AbsRel (affine-aligned depth) and relative depth difference to upstream.
 
-| version | native ms | 518 ms | speed-up native vs `infer` default | peak MB native | peak MB 518 | startup / first call / new size | NYU-20 AbsRel | rel. depth diff vs upstream |
+| version | native ms | 518 ms | speed-up native (vs flags / vs `infer` default) | peak MB native | peak MB 518 | startup / first call / new size | NYU-20 AbsRel | rel. depth diff vs upstream |
 |---|---|---|---|---|---|---|---|---|
-| upstream, fp32 (CLI path) | 500.4 | 97.3 | 0.34x | 2642 / 3258 | 1659 / 1830 | 5.2 s / 1002 ms / 99 ms | 0.0321 | 0 |
-| upstream, `infer` default (fp16 autocast) | 169.7 | 43.2 | 1.00x | 2335 / 2618 | 1580 / 1672 | 5.2 s / 823 ms / 144 ms | 0.0321 | - |
-| **portable** (`return_normal=False`) | 153.2 | 39.7 | 1.11x | 2332 / 2632 | 1579 / 1668 | 4.6 s / 1072 ms / 139 ms | 0.0321 | fp rounding only |
-| portable + `model.half()` | 137.1 | 33.6 | 1.24x | 1363 / 1680 | 871 / 928 | 4.6 s / 1069 ms / 135 ms | 0.0321 | 3e-4 |
-| **cuda-kernels** | 85.9 | 22.0 | 1.98x | 1479 / 1786 | 931 / 1012 | 1.5 s / 854 ms / 45 ms | 0.0321 | 1e-3 |
-| cuda-kernels, kernels off | 133.5 | 30.0 | 1.27x | 1592 / 1946 | 960 / 1046 | 1.4 s / 879 ms / 35 ms | 0.0321 | 3e-4 |
+| upstream, fp32 (CLI path) | 500.4 | 97.3 | 0.30x / 0.34x | 2642 / 3258 | 1659 / 1830 | 5.2 s / 1002 ms / 99 ms | 0.0321 | 0 |
+| upstream (`infer` default, fp16 autocast) | 169.7 | 43.2 | 0.89x / 1.00x | 2335 / 2618 | 1580 / 1672 | 5.2 s / 823 ms / 144 ms | 0.0321 | - |
+| upstream + flags (`model.half()`, `cudnn.benchmark`, `inference_mode`) | 151.3 | 36.5 | 1.00x / 1.12x | 1369 / 1668 | 871 / 928 | 6.4 s / 2235 ms / 525 ms | 0.0321 | not measured |
+| **portable** (`return_normal=False`) | 153.2 | 39.7 | 0.99x / 1.11x | 2332 / 2632 | 1579 / 1668 | 4.6 s / 1072 ms / 139 ms | 0.0321 | fp rounding only |
+| portable + `model.half()` | 137.1 | 33.6 | 1.10x / 1.24x | 1363 / 1680 | 871 / 928 | 4.6 s / 1069 ms / 135 ms | 0.0321 | 3e-4 |
+| **cuda-kernels** | 85.9 | 22.0 | 1.76x / 1.98x | 1479 / 1786 | 931 / 1012 | 1.5 s / 854 ms / 45 ms | 0.0321 | 1e-3 |
+| cuda-kernels, kernels off | 133.5 | 30.0 | 1.13x / 1.27x | 1592 / 1946 | 960 / 1046 | 1.4 s / 879 ms / 35 ms | 0.0321 | 3e-4 |
+
+Flags row: driver-side only, no source edit: upstream `infer` (fp16 autocast kept) on a `model.half()` model, `cudnn.benchmark` (autotune is in the first call / new size). Without `model.half()`, `cudnn.benchmark` alone gave 168.1 / 43.5 ms (no gain). channels_last not measured (ViT backbone). Raw: `results/2026-10-23_flags_older_forks/` of the publishing workspace.
 
 Speed-up is against upstream's default `infer` (fp16 autocast); against the fp32 CLI path, portable is 3.27x and cuda-kernels 5.83x. Raw numbers, commits and commands: `results/2026-10-12_moge_release/` of the publishing workspace.
 
